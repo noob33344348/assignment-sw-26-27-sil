@@ -23,4 +23,5 @@ so notify_one should be more appropriate then notify_all.<p>
 
 <p>I have not understood the meaning of have the ecu parameter.</p>
 
-## CI workflow
+## CI Workflow
+<p> --fresh additionally requests a fresh build-tree configuration. </p>

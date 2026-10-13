@@ -19,4 +19,4 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes ninja-build
 
       - name: SIL workflow
-        run: cmake --workflow --preset sil
+        run: cmake --workflow --preset sil --fresh
