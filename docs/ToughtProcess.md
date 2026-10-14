@@ -23,5 +23,22 @@ so notify_one should be more appropriate then notify_all.<p>
 
 <p>I have not understood the meaning of have the ecu parameter.</p>
 
+## Tests
+
+### test_smu_plausiblity
+<p>It's the same as test_smu_fault, but the APP2 is artificially set to 3300. So that it differs by more then 50 counts, and around 30%</p>
+
+### test_smu_periodic_output
+<p>Reusing wait_for_frame, it checks that smu publishes n frames in time.</p>
+<p>Warning: wait_for_frame has a timeout of 300ms, this is applied for any value of n.</p>
+<p>If this test needs to check with more granularity a solution could be implementing wait_for_frame that also includes a parameter for a different timeout.</p>
+
+### test_ebs_missing_input
+<p>Restarting the system after every possible missing frame to correctly separate the 3 cases.</p>
+
+### test_ebs_pressure_fault
+<p>Restarting the system after every possible missing frame to correctly separate the 3 cases.</p>
+<p>Sending correct nominal values before the faulty one to establish known good baseline.</p>
+
 ## CI Workflow
 <p> --fresh additionally requests a fresh build-tree configuration. </p>

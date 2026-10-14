@@ -5,6 +5,9 @@
 #include <cstdio>
 #include <thread>
 
+#define NPERIODICOUTPUT 10
+
+
 namespace {
 
 using raceup::sil::Frame;
@@ -155,6 +158,68 @@ void test_smu_fault(TestContext& context) {
   system.stop();
 }
 
+void test_smu_plausiblity(TestContext& context) {
+  SilSystem system;
+  configure_nominal_inputs(system);
+  system.start();
+
+  Frame nominal{};
+  const bool nominal_received = wait_for_frame(
+    system, raceup::sil::can_id::SmuSense, nominal);
+  context.expect(nominal_received,
+                 "SMU publishes a frame before a live sensor change");
+
+  system.set_sensor(SensorId::SmuApps2Raw, 3300U);
+
+  Frame frame{};
+  const bool received = wait_for_matching_frame(
+    system, raceup::sil::can_id::SmuSense,
+    [](const Frame& candidate) {
+      return candidate.data[0] == 0U && candidate.data[2] != 0U;
+    },
+  frame);
+  context.expect(received, "SMU publishes a fault frame after a live change");
+  if (received) {
+    context.expect(frame.data[0] == 0U,
+                   "SMU inhibits throttle on APP disagreement");
+    context.expect(frame.data[2] != 0U, "SMU reports the APP fault");
+  }
+
+  system.set_sensor(SensorId::SmuApps2Raw, 3000U);
+  Frame recovered{};
+  const bool recovered_received = wait_for_matching_frame(
+    system, raceup::sil::can_id::SmuSense,
+    [](const Frame& candidate) {
+      return candidate.data[0] != 0U && candidate.data[2] == 0U;
+    },
+    recovered);
+  context.expect(recovered_received,
+                 "SMU publishes a frame after recovering the live input");
+  if (recovered_received) {
+    context.expect(recovered.data[0] != 0U && recovered.data[2] == 0U,
+                   "SMU returns to the nominal state after recovery");
+  }
+
+  system.stop();
+}
+
+
+void test_smu_periodic_output(TestContext& context, uint8_t count) {
+  SilSystem system;
+  configure_nominal_inputs(system);
+  system.start();
+
+  bool received = true;
+  for(; count > 0; count--)
+  {
+    Frame frame{};
+    received &= wait_for_frame(
+      system, raceup::sil::can_id::SmuSense, frame);
+  }
+  context.expect(received, "SMU publishes frames periodically");
+  system.stop();
+}
+
 void test_ebs_nominal_and_stale_input(TestContext& context) {
   SilSystem system;
   configure_nominal_inputs(system);
@@ -233,16 +298,165 @@ void test_ebs_brake_request(TestContext& context) {
   system.stop();
 }
 
+bool check_ebs_safe_state(SilSystem& system)
+{
+  return system.output(OutputId::EbsAsNodeClosed) == 0U &&
+          system.output(OutputId::EbsValve1Engaged) == 1U &&
+          system.output(OutputId::EbsValve2Engaged) == 1U &&
+          system.output(OutputId::EbsFaultCode) != 0U;
+}
+
+void test_ebs_missing_input(TestContext& context){
+  SilSystem system;
+  configure_nominal_inputs(system);
+  system.start();
+
+  // Missing vehicle_status frame
+  system.send_frame(brake_pressure(40U, 40U, 8U, 8U));
+  system.send_frame(ebs_command(false, false));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Missing vehicle_status frame doesn't result in safe state.");
+  system.stop();
+
+  // Missing brake_pressure frame
+  configure_nominal_inputs(system);
+  system.start();
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(ebs_command(false, false));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Missing brake_pressure frame doesn't result in safe state.");
+  system.stop();
+
+  // Missing ebs_command frame
+  configure_nominal_inputs(system);
+  system.start();
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(brake_pressure(40U, 40U, 8U, 8U));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Missing ebs_command frame doesn't result in safe state.");
+  system.stop();
+}
+
+void test_ebs_pressure_fault(TestContext& context) {
+  SilSystem system;
+  configure_nominal_inputs(system);
+  system.start();
+
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(brake_pressure(40U, 40U, 8U, 8U));
+  system.send_frame(ebs_command(false, false));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(system.output(OutputId::EbsAsNodeClosed) == 1U,
+                 "EBS is nominal before the pressure fault");
+
+  // Left too low
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(brake_pressure(40U, 40U, 7U, 8U));
+  system.send_frame(ebs_command(false, false));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Left pressure too low doesn't result in safe state.");
+  system.stop();
+
+  // Front too high
+  configure_nominal_inputs(system);
+  system.start();
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(brake_pressure(40U, 40U, 8U, 8U));
+  system.send_frame(ebs_command(false, false));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(system.output(OutputId::EbsAsNodeClosed) == 1U,
+                 "EBS is nominal before the pressure fault");
+
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(brake_pressure(100U, 40U, 8U, 8U));
+  system.send_frame(ebs_command(false, false));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Front pressure too high doesn't result in safe state.");
+  system.stop();
+
+  // 1.8 rule
+  configure_nominal_inputs(system);
+  system.start();
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(brake_pressure(40U, 40U, 8U, 8U));
+  system.send_frame(ebs_command(false, false));
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(system.output(OutputId::EbsAsNodeClosed) == 1U,
+                 "EBS is nominal before the pressure fault");
+
+  system.send_frame(vehicle_status(false, true, 0U));
+  system.send_frame(brake_pressure(20U, 99U, 8U, 8U));
+  system.send_frame(ebs_command(false, false));
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Breaking 1.8 rule doesn't result in safe state.");
+  system.stop();
+}
+
+void test_ebs_watchdog(TestContext& context){
+  SilSystem system;
+  configure_nominal_inputs(system);
+  system.start();
+
+  system.set_sensor(SensorId::EbsWatchdogHealthy, 1U);
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Watchdog fault doesn't result in safe state.");
+  system.stop();
+}
+
+void test_ebs_asms(TestContext& context){
+  SilSystem system;
+  configure_nominal_inputs(system);
+  system.start();
+
+  system.set_sensor(SensorId::EbsAsmsActive, 1U);
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "ASMS fault doesn't result in safe state.");
+  system.stop();
+}
+
+void test_ebs_valvespowered(TestContext& context){
+  SilSystem system;
+  configure_nominal_inputs(system);
+  system.start();
+
+  system.set_sensor(SensorId::EbsValvesPowered, 1U);
+  std::this_thread::sleep_for(std::chrono::milliseconds(80));
+  context.expect(check_ebs_safe_state(system), "Valves Powered fault doesn't result in safe state.");
+  system.stop();
+}
+
 }  // namespace
+
+
 
 int main() {
   TestContext context;
   test_lifecycle(context);
   test_smu_nominal(context);
   test_smu_fault(context);
+
+  // My SMU tests
+  test_smu_plausiblity(context);
+  test_smu_periodic_output(context, NPERIODICOUTPUT);
+
   test_ebs_nominal_and_stale_input(context);
   test_ebs_requires_ready_to_drive(context);
   test_ebs_brake_request(context);
+
+  // My EBS tests
+  test_ebs_missing_input(context);
+  test_ebs_pressure_fault(context);
+  test_ebs_watchdog(context);
+  test_ebs_asms(context);
+  test_ebs_valvespowered(context);
+
+
 
   if (context.failures != 0) {
     std::printf("%d test assertion(s) failed\n", context.failures);
